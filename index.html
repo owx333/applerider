@@ -307,7 +307,7 @@
 
 
   /* SKELETON LOADER */
-  .app-loader { position: fixed; inset: 0; z-index: 10000; background: var(--bg-mesh); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 24px; transition: opacity 0.4s var(--ease-smooth), visibility 0.4s; }
+  .app-loader { position: fixed; inset: 0; z-index: 9998; background: var(--bg-mesh); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 24px; transition: opacity 0.4s var(--ease-smooth), visibility 0.4s; }
   .app-loader.hidden { opacity: 0; visibility: hidden; pointer-events: none; }
   .loader-logo { width: 64px; height: 64px; border-radius: 16px; object-fit: contain; animation: loaderPulse 1.8s ease-in-out infinite; }
   .loader-bar { width: 120px; height: 3px; background: var(--border); border-radius: 3px; overflow: hidden; }
@@ -1532,6 +1532,7 @@ let bookingCounter = 1000;
 let calYear, calMonth;
 let currentUser = null;
 let unsubscribers = [];
+let listenersStarted = false;
 
 // ============================================================
 // LOGIN SCREEN
@@ -1539,12 +1540,24 @@ let unsubscribers = [];
 function showLogin() {
   document.getElementById('login-overlay').style.display = 'flex';
   document.querySelector('.app').style.display = 'none';
+  hideAppLoader();
+  resetLoginButton();
 }
 
 function hideLogin() {
   document.getElementById('login-overlay').style.display = 'none';
   document.querySelector('.app').style.display = 'flex';
   hideAppLoader();
+  resetLoginButton();
+}
+
+function resetLoginButton() {
+  const btn = document.getElementById('login-btn');
+  if (btn) {
+    btn.textContent = 'Login';
+    btn.disabled = false;
+    btn.style.opacity = '1';
+  }
 }
 
 window.doLogin = async function() {
@@ -1553,14 +1566,28 @@ window.doLogin = async function() {
   const errEl = document.getElementById('login-error');
   errEl.textContent = '';
   const btn = document.getElementById('login-btn');
-  btn.textContent = 'Logging in...'; btn.disabled = true;
+  btn.textContent = 'Signing in...'; btn.disabled = true;
   try {
-    await signInWithEmailAndPassword(auth, email, pass);
-    await bootstrapAccess();
-    await checkFirebaseConnection();
+    const cred = await Promise.race([
+      signInWithEmailAndPassword(auth, email, pass),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Connection timeout — use http://localhost:8080 not file://')), 15000))
+    ]);
+    currentUser = cred.user;
+    document.getElementById('user-email-display').textContent = cred.user.email;
+    try {
+      await bootstrapAccess();
+    } catch (be) {
+      console.warn('bootstrapAccess:', be);
+      if (be.code === 'permission-denied') {
+        errEl.textContent = 'Login OK but no admin access. Ask admin to add your email in Firebase → settings/access → admins';
+      }
+    }
+    hideLogin();
+    startListeners();
+    applyRoleUI();
   } catch(e) {
     errEl.textContent = 'Login failed: ' + (e.code === 'auth/invalid-credential' ? 'Wrong email or password' : e.message);
-    btn.textContent = 'Login'; btn.disabled = false; btn.style.opacity = '1';
+    resetLoginButton();
   }
 };
 
@@ -1568,6 +1595,7 @@ window.doLogout = async function() {
   if (!confirm('Logout?')) return;
   unsubscribers.forEach(u => u());
   unsubscribers = [];
+  listenersStarted = false;
   await signOut(auth);
   db = { bookings:[], customers:[], drivers:[], vehicles:[], income:[], expenses:[], closings:[], notifications:[] };
   showLogin();
@@ -2315,6 +2343,13 @@ function init() {
   calMonth = now.getMonth();
   document.getElementById('topbar-date').textContent = now.toLocaleDateString('en-MY', { weekday:'long', year:'numeric', month:'long', day:'numeric' });
 
+  if (location.protocol === 'file:') {
+    const warn = document.getElementById('login-error');
+    if (warn) warn.textContent = 'Please open http://localhost:8080 — file:// blocks Firebase login.';
+  } else {
+    hideAppLoader();
+  }
+
   onAuthStateChanged(auth, (user) => {
     if (user) {
       currentUser = user;
@@ -2322,17 +2357,28 @@ function init() {
       syncLoginLogo();
       hideLogin();
       startListeners();
-      bootstrapAccess().then(() => applyRoleUI());
+      bootstrapAccess().then(() => applyRoleUI()).catch(e => {
+        console.error('bootstrapAccess', e);
+        toast('Access setup issue — check Firebase settings/access', 'error');
+      });
     } else {
       currentUser = null;
       currentDriverProfile = null;
       userRole = 'admin';
+      listenersStarted = false;
       showLogin();
     }
   });
+
+  // Safety: never block login screen with loader
+  setTimeout(() => {
+    if (document.getElementById('login-overlay')?.style.display !== 'none') hideAppLoader();
+  }, 1500);
 }
 
 function startListeners() {
+  if (listenersStarted) return;
+  listenersStarted = true;
   subscribeSettings();
   checkFirebaseConnection();
   // Subscribe to all collections
